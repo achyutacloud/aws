@@ -1,3 +1,9 @@
 Hi Hello
 
 Simple Indexs
+
+aws s3 cp c:\sync\logs\log1.xml s3://atasync1/
+
+adadad
+
+casczscscscs
