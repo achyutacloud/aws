@@ -1,0 +1,233 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  GithubRepo:
+    Description: Gitub Repository name
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: MyGitRepo
+  GithubToken:
+    Description: 'Github OAuth Token with full permissions on admin:repo_hook and repo'
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    NoEcho: true
+    Default: MyGitToken
+  GithubUser:
+    Description: Github user where the repository lives
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: MyGitUser
+
+Resources:
+  BuildArtifactsBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: cicd-deployment-website-s3-gar-pipeline-bucket
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+        - Key: Project
+          Value: cicd-deployment-pipeline-bootstrap_to_s3
+    DeletionPolicy: Retain
+  CodeBuildProject:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: cicd-deployment-pipeline-bootstrap_to_s3
+      Description: Build project for the cicd-deployment-pipeline-bootstrap_to_s3
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: 'aws/codebuild/standard:4.0'
+        EnvironmentVariables:
+          - Name: BUILD_OUTPUT_BUCKET
+            Value: !Ref BuildArtifactsBucket
+      Cache:
+        Type: S3
+        Location: !Sub '${BuildArtifactsBucket}/codebuild-cache'
+      ServiceRole: !GetAtt 
+        - CodeBuildServiceRole
+        - Arn
+      Source:
+        Type: CODEPIPELINE
+      Tags:
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+        - Key: Project
+          Value: cicd-deployment-pipeline-bootstrap_to_s3
+  Pipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      ArtifactStore:
+        Location: !Ref BuildArtifactsBucket
+        Type: S3
+      Name: cicd-deployment-pipeline-bootstrap_to_s3
+      RoleArn: !GetAtt 
+        - CodePipelineExecutionRole
+        - Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceCodeRepo
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: '1'
+              Configuration:
+                Owner: !Ref GithubUser
+                Repo: !Ref GithubRepo
+                Branch: master
+                OAuthToken: !Ref GithubToken
+              OutputArtifacts:
+                - Name: SourceCodeAsZip
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: CodeBuild
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: SourceCodeAsZip
+              OutputArtifacts:
+                - Name: BuildArtifactAsZip
+
+  CodeBuildServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+      Path: /
+      Policies:
+        - PolicyName: CodeBuildLogs
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'logs:CreateLogGroup'
+                  - 'logs:CreateLogStream'
+                  - 'logs:PutLogEvents'
+                Resource:
+                  - !Sub >-
+                    arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/cicd-deployment-pipeline-bootstrap_to_s3
+                  - !Sub >-
+                    arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/cicd-deployment-pipeline-bootstrap_to_s3:*
+        - PolicyName: CodeBuildArtifactsBucket
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 's3:*'
+                Resource:
+                  - 'arn:aws:s3:::cicd-deployment-website-s3-gar-pipeline-bucket'
+        - PolicyName: CodeBuildParameterStore
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action: 'ssm:GetParameters'
+                Resource: '*'
+  CodePipelineExecutionRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action:
+              - 'sts:AssumeRole'
+            Effect: Allow
+            Principal:
+              Service:
+                - codepipeline.amazonaws.com
+      Path: /
+      Policies:
+        - PolicyName: CodePipelineAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'iam:PassRole'
+                  - 'lambda:InvokeFunction'
+                  - 'lambda:ListFunctions'
+                  - 'lambda:InvokeAsyc'
+                Resource: '*'
+        - PolicyName: CodePipelineCodeAndArtifactsS3Bucket
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:PutObject'
+                  - 's3:GetObject'
+                  - 's3:PutObjectAcl'
+                Resource: !Sub 'arn:aws:s3:::${BuildArtifactsBucket}/*'
+        - PolicyName: CodePipelineCodeBuildAndCloudformationAccess
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'codebuild:StartBuild'
+                  - 'codebuild:BatchGetBuilds'
+                Resource:
+                  - !Sub >-
+                    arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/${CodeBuildProject}
+              - Effect: Allow
+                Action:
+                  - 'cloudformation:CreateStack'
+                  - 'cloudformation:DescribeStacks'
+                  - 'cloudformation:DeleteStack'
+                  - 'cloudformation:UpdateStack'
+                  - 'cloudformation:CreateChangeSet'
+                  - 'cloudformation:ExecuteChangeSet'
+                  - 'cloudformation:DeleteChangeSet'
+                  - 'cloudformation:DescribeChangeSet'
+                  - 'cloudformation:SetStackPolicy'
+                  - 'cloudformation:SetStackPolicy'
+                  - 'cloudformation:ValidateTemplate'
+                Resource:
+                  - !Sub >-
+                    arn:aws:cloudformation:${AWS::Region}:${AWS::AccountId}:stack/${AWS::StackName}/
+                  - !Sub >-
+                    arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31
+Outputs:
+  GitHubRepositoryHttpUrl:
+    Description: GitHub Git repository
+    Value: !Sub 'https://github.com/${GithubUser}/${GithubRepo}.git'
+  GitHubRepositorySshUrl:
+    Description: GitHub Git repository
+    Value: !Sub 'git@github.com:${GithubUser}/${GithubRepo}.git'
+  BuildArtifactS3Bucket:
+    Description: Amazon S3 Bucket for Pipeline and Build artifacts
+    Value: !Ref BuildArtifactsBucket
+  CodeBuildProject:
+    Description: CodeBuild Project name
+    Value: !Ref CodeBuildProject
+  CodePipeline:
+    Description: AWS CodePipeline pipeline name
+    Value: !Ref Pipeline
+  CodeBuildIAMRole:
+    Description: CodeBuild IAM Role
+    Value: !GetAtt 
+      - CodeBuildServiceRole
+      - Arn
+  CodePipelineIAMRole:
+    Description: CodePipeline IAM Role
+    Value: !GetAtt 
+      - CodePipelineExecutionRole
+      - Arn

@@ -1,3 +1,6 @@
 CICD_URL
 
 https://youtu.be/FuXpwLiMI_Q
+
+
+https://about.gitlab.com/blog/2021/02/05/ci-deployment-and-environments/
