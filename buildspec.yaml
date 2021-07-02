@@ -2,5 +2,5 @@ version: 0.1
 phases:
   install:
     commands:
-        - aws s3 cp ./ s3://cicd-pipeline-achyuta-cloud/FileUpload/ --recursive --exclude "*" --exclude "MyFiles/*" --include "*.txt"
+        - aws s3 cp ./ s3://cicd-pipeline-achyuta-cloud/FileUpload+$(date+"%d-%m-%y") --recursive --exclude "*" --exclude "MyFiles/*" --include "*.txt"
 
