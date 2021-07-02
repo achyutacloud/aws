@@ -1,0 +1,113 @@
+AWSTemplateFormatVersion: 2010-09-09
+Parameters:
+  GithubRepo:
+    Description: Gitub Repository name
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: MyGitRepo
+  GithubToken:
+    Description: 'Github OAuth Token with full permissions on admin:repo_hook and repo'
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    NoEcho: true
+    Default: MyGitToken
+  GithubUser:
+    Description: Github user where the repository lives
+    Type: 'AWS::SSM::Parameter::Value<String>'
+    Default: MyGitUser
+
+Resources:
+  BuildArtifactsBucket:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: cicd-deployment-website-s3-gar-pipeline-bucket-123
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      Tags:
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+        - Key: Project
+          Value: cicd-deployment-pipeline-bootstrap_to_s3
+    DeletionPolicy: Retain
+  CodeBuildProject:
+    Type: 'AWS::CodeBuild::Project'
+    Properties:
+      Name: cicd-deployment-pipeline-bootstrap_to_s3_gar-123
+      Description: Build project for the cicd-deployment-pipeline-bootstrap_to_s3
+      Artifacts:
+        Type: CODEPIPELINE
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: 'aws/codebuild/standard:4.0'
+        EnvironmentVariables:
+          - Name: BUILD_OUTPUT_BUCKET
+            Value: !Ref BuildArtifactsBucket
+      Cache:
+        Type: S3
+        Location: !Sub '${BuildArtifactsBucket}/codebuild-cache'
+      ServiceRole: !Sub 'arn:aws:iam::052008640443:role/PipelinS3-CodeBuildServiceRole-14F7BA0ZY96L7'
+      Source:
+        Type: CODEPIPELINE
+      Tags:
+        - Key: Stack
+          Value: !Ref 'AWS::StackName'
+        - Key: Project
+          Value: cicd-deployment-pipeline-bootstrap_to_s3
+  Pipeline:
+    Type: 'AWS::CodePipeline::Pipeline'
+    Properties:
+      ArtifactStore:
+        Location: !Ref BuildArtifactsBucket
+        Type: S3
+      Name: cicd-deployment-pipeline-bootstrap_to_s3-123
+      RoleArn: !Sub 'arn:aws:iam::052008640443:role/PipelinS3-CodePipelineExecutionRole-2F1HW2QDPO9B'
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: SourceCodeRepo
+              ActionTypeId:
+                Category: Source
+                Owner: ThirdParty
+                Provider: GitHub
+                Version: '1'
+              Configuration:
+                Owner: !Ref GithubUser
+                Repo: !Ref GithubRepo
+                Branch: master
+                OAuthToken: !Ref GithubToken
+              OutputArtifacts:
+                - Name: SourceCodeAsZip
+              RunOrder: 1
+        - Name: Build
+          Actions:
+            - Name: CodeBuild
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: '1'
+              Configuration:
+                ProjectName: !Ref CodeBuildProject
+              InputArtifacts:
+                - Name: SourceCodeAsZip
+              OutputArtifacts:
+                - Name: BuildArtifactAsZip
+
+Outputs:
+  GitHubRepositoryHttpUrl:
+    Description: GitHub Git repository
+    Value: !Sub 'https://github.com/${GithubUser}/${GithubRepo}.git'
+  GitHubRepositorySshUrl:
+    Description: GitHub Git repository
+    Value: !Sub 'git@github.com:${GithubUser}/${GithubRepo}.git'
+  BuildArtifactS3Bucket:
+    Description: Amazon S3 Bucket for Pipeline and Build artifacts
+    Value: !Ref BuildArtifactsBucket
+  CodeBuildProject:
+    Description: CodeBuild Project name
+    Value: !Ref CodeBuildProject
+  CodePipeline:
+    Description: AWS CodePipeline pipeline name
+    Value: !Ref Pipeline
+  
