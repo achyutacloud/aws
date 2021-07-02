@@ -1,6 +1,6 @@
 version: 0.2
 phases:
-  DATE = $(date '+%Y%m%d')
+  DATE: $(date '+%Y%m%d')
   install:
     commands:
         - aws s3 cp ./ s3://cicd-pipeline-achyuta-cloud/FileUpload/${DATE} --recursive --exclude "*" --exclude "MyFiles/*" --include "*.txt"
