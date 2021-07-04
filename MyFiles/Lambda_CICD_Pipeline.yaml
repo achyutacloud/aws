@@ -1,0 +1,366 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: Create CodeBuild Stack Template
+
+Parameters:
+  AssetId:
+    Description: Asset Insight ID
+    Type: Number
+  LambdaRepo:
+    Type: String
+    Description: Name of the repo which contains Lambda function.
+  DeployStackName:
+    Type: String
+    Description: Stack name of Lambda function being deployed
+  GitHubOwner:
+    Type: String
+    AllowedPattern: '[A-Za-z0-9_-]+'
+    Description: The owner of the GitHub repository
+  GitHubBranch:
+    Type: String
+    Default: main
+    AllowedPattern: '[A-Za-z0-9_/-]+'
+    Description: The name of the GitHub repository branch that should trigger the pipeline
+  KMSkeyS3:
+    Type: String
+    Description: Default KMS key used
+  GithubConnectionArn:
+    Type: String
+
+Resources:
+  S3BucketForCodePipeline:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Sub "a${AssetId}-codepipeline-storage"
+      LifecycleConfiguration:
+        Rules:
+          - ExpirationInDays: 30
+            NoncurrentVersionExpirationInDays: 7
+            Status: Enabled
+          - AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+            Status: Enabled
+
+  S3BucketLambda:
+    Type: 'AWS::S3::Bucket'
+    Properties:
+      BucketName: !Sub "a${AssetId}-lambda-storage"
+      LifecycleConfiguration:
+        Rules:
+          - ExpirationInDays: 30
+            NoncurrentVersionExpirationInDays: 7
+            Status: Enabled
+          - AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 7
+            Status: Enabled
+
+  LambdaRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName:
+        Fn::Sub: a${AssetId}-Lambda-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Path: /
+      PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/tr-permission-boundary"
+      Policies:
+        - PolicyName: !Sub "a${AssetId}-LambdaPolicy"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+            - Effect: Allow
+              Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              Resource: "*"
+
+  CodeBuildRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName:
+        Fn::Sub: a${AssetId}-CodeBuildRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "codebuild.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /service-role/
+      PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/tr-permission-boundary"
+      Policies:
+        - PolicyName: !Sub "a${AssetId}-CodeBuildCICDAccessPolicy"
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Resource:
+                  - !Sub arn:aws:s3:::codepipeline-${AWS::Region}-*
+                Action:
+                  - s3:PutObject
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketAcl
+                  - s3:GetBucketLocation
+              - Effect: Allow
+                Action:
+                  - codebuild:CreateReportGroup
+                  - codebuild:CreateReport
+                  - codebuild:UpdateReport
+                  - codebuild:BatchPutTestCases
+                  - codebuild:BatchPutCodeCoverages
+                Resource:
+                  - !Sub arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:report-group/CICDLambdaBuild-*
+              - Effect: Allow
+                Action: s3:*
+                Resource:
+                  - Fn::Sub: "arn:aws:s3:::${S3BucketForCodePipeline}/*"
+                  - Fn::Sub: "arn:aws:s3:::${S3BucketForCodePipeline}"
+                  - Fn::Sub: "arn:aws:s3:::${S3BucketLambda}/*"
+                  - Fn::Sub: "arn:aws:s3:::${S3BucketLambda}"
+              - Effect: Allow
+                Action:
+                  - kms:Decrypt
+                Resource: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KMSkeyS3}
+              - Effect: Allow
+                Action:
+                  - logs:GetLogEvents
+                  - logs:PutLogEvents
+                  - logs:CreateLogStream
+                  - logs:DescribeLogStreams
+                  - logs:DescribeLogStreams
+                  - logs:PutRetentionPolicy
+                  - logs:CreateLogGroup
+                Resource:
+                  - arn:aws:logs:::log-group:/aws/codebuild/:log-stream:
+                  - arn:aws:logs:::log-group:/aws/codebuild/*
+
+  LambdaBuildProject:
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Sub a${AssetId}-LambdaBuildProject-${AWS::StackName}
+      Description: convert sam to cloudformation and store in s3
+      ServiceRole: !GetAtt [ CodeBuildRole, Arn ]
+      Artifacts:
+        Type: S3
+        Location: !Ref S3BucketLambda
+        Name: !Sub a${AssetId}-LambdaBuildProject-${AWS::StackName}
+        Packaging: ZIP
+      Environment:
+        Type: LINUX_CONTAINER
+        ComputeType: BUILD_GENERAL1_SMALL
+        Image: aws/codebuild/standard:3.0
+        EnvironmentVariables:
+          - Name: LambdaBucket
+            Value: !Ref S3BucketLambda
+      Source:
+        Auth:
+          Type: OAUTH
+        Location: !Sub https://github.com/${GitHubOwner}/${LambdaRepo}.git
+        Type: GITHUB
+      TimeoutInMinutes: 15
+      Tags:
+        - Key: Name
+          Value: !Sub LambdaBuildProject-${AWS::StackName}
+
+  CfnServiceRole:
+    Type: 'AWS::IAM::Role'
+    Properties:
+      RoleName:
+        Fn::Sub: a${AssetId}-CfnServiceRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - cloudformation.amazonaws.com
+            Action: 'sts:AssumeRole'
+      Path: /
+      PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/tr-permission-boundary"
+      Policies:
+        - PolicyName: !Sub "a${AssetId}-CodeDeployCICDAccessPolicy"
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:
+                  - s3:GetObject
+                  - s3:GetObjectVersion
+                  - s3:GetBucketVersioning
+                Resource: "*"
+                Effect: Allow
+              - Action:
+                  - s3:PutObject
+                Resource:
+                  - arn:aws:s3:::codepipeline*
+                Effect: Allow
+              - Action:
+                  - lambda:*
+                Resource:
+                  - !Sub arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:*
+                Effect: Allow
+              - Action:
+                  - iam:GetRole
+                  - iam:CreateRole
+                  - iam:DeleteRole
+                  - iam:PutRolePolicy
+                  - iam:AttachRolePolicy
+                  - iam:DeleteRolePolicy
+                  - iam:DetachRolePolicy
+                Resource:
+                  - !Sub arn:aws:iam::${AWS::AccountId}:role/*
+                Effect: Allow
+              - Action:
+                  - iam:PassRole
+                Resource:
+                  - "*"
+                Effect: Allow
+              - Action:
+                  - cloudformation:CreateChangeSet
+                Resource:
+                  - !Sub arn:aws:cloudformation:${AWS::Region}:aws:transform/Serverless-2016-10-31
+                Effect: Allow
+
+  CodePipelineRole:
+    Type: "AWS::IAM::Role"
+    Properties:
+      RoleName:
+        Fn::Sub: a${AssetId}-CodePipelineRole-${AWS::StackName}
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: "Allow"
+            Principal:
+              Service:
+                - "codepipeline.amazonaws.com"
+            Action:
+              - "sts:AssumeRole"
+      Path: /
+      PermissionsBoundary: !Sub "arn:aws:iam::${AWS::AccountId}:policy/tr-permission-boundary"
+      Policies:
+        - PolicyName: !Sub "a${AssetId}-CodePipelineCICDAccessPolicy"
+          PolicyDocument:
+            Statement:
+              - Action:
+                  - iam:PassRole
+                Resource: "*"
+                Effect: Allow
+                Condition:
+                  StringEqualsIfExists:
+                    iam:PassedToService:
+                      - cloudformation.amazonaws.com
+              - Action:
+                  - codecommit:CancelUploadArchive
+                  - codecommit:GetBranch
+                  - codecommit:GetCommit
+                  - codecommit:GetRepository
+                  - codecommit:GetUploadArchiveStatus
+                  - codecommit:UploadArchive
+                Resource: "*"
+                Effect: Allow
+              - Action:
+                  - codestar-connections:UseConnection
+                Resource: "*"
+                Effect: Allow
+              - Action:
+                  - cloudwatch:*
+                  - s3:*
+                  - cloudformation:*
+                Resource: "*"
+                Effect: Allow
+              - Action:
+                  - lambda:InvokeFunction
+                  - lambda:ListFunctions
+                Resource: "*"
+                Effect: Allow
+              - Action:
+                  - codebuild:BatchGetBuilds
+                  - codebuild:StartBuild
+                  - codebuild:BatchGetBuildBatches
+                  - codebuild:StartBuildBatch
+                Resource: "*"
+                Effect: Allow
+              - Effect: Allow
+                Action:
+                  - cloudformation:ValidateTemplate
+                Resource: "*"
+            Version: '2012-10-17'
+
+
+  DeployPipeline:
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name:  !Sub a${AssetId}-CICDPipe-${AWS::StackName}
+      RoleArn: !GetAtt [CodePipelineRole, Arn]
+      ArtifactStore:
+        Location: !Ref S3BucketForCodePipeline
+        Type: S3
+        EncryptionKey:
+          Id: !Sub arn:aws:kms:${AWS::Region}:${AWS::AccountId}:key/${KMSkeyS3}
+          Type: KMS
+      Stages:
+        - Name: Source
+          Actions:
+            - InputArtifacts: [ ]
+              ActionTypeId:
+                Version: '1'
+                Owner: AWS
+                Category: Source
+                Provider: CodeStarSourceConnection
+              OutputArtifacts:
+                - Name: ApplicationOutput
+              RunOrder: 1
+              Configuration:
+                ConnectionArn: !Ref GithubConnectionArn
+                FullRepositoryId: !Sub "${GitHubOwner}/${LambdaRepo}"
+                BranchName: !Ref GitHubBranch
+                OutputArtifactFormat: "CODE_ZIP"
+              Name: ApplicationSource
+
+        - Name: Build
+          Actions:
+            - Name: CodeBuild
+              InputArtifacts:
+                - Name: ApplicationOutput
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Version: 1
+                Provider: CodeBuild
+              OutputArtifacts:
+                - Name: LambdaArtifact
+              Configuration:
+                ProjectName: !Ref LambdaBuildProject
+              RunOrder: 1
+        - Name: DeployLambda
+          Actions:
+            - Name: ExecuteChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: '1'
+              RunOrder: 1
+              Configuration:
+                ActionMode: CREATE_UPDATE
+                Capabilities: CAPABILITY_NAMED_IAM,CAPABILITY_AUTO_EXPAND
+                RoleArn: !GetAtt [ CfnServiceRole, Arn ]
+                StackName: !Sub "a${AssetId}-${DeployStackName}"
+                TemplatePath: LambdaArtifact::outputSamTemplate.yaml
+              OutputArtifacts: [ ]
+              InputArtifacts:
+                - Name: LambdaArtifact
+
+Outputs:
+  LambdaRoleArn:
+    Description: Lambda role Arn
+    Value: !GetAtt [ LambdaRole, Arn ]
+    Export:
+      Name: LambdaRoleArn
